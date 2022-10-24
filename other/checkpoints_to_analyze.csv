@@ -1,0 +1,16 @@
+,name,width,dataset,checkpoint
+0,Ecoset simclr,0.5,ecoset,/nfs/gatsbystor/ammarica/Ecoset/Checkpoints_simclr_half_width_b_1024_lr_01
+1,Ecoset simclr,1,ecoset,/nfs/gatsbystor/ammarica/Ecoset/Checkpoints_simclr_b_1024_lr_05
+2,Ecoset simclr,2,ecoset,/nfs/gatsbystor/ammarica/Ecoset/Checkpoints_simclr_2_wider_b_1024_lr_05
+3,Ecoset sup,0.5,ecoset,/nfs/gatsbystor/ammarica/Ecoset/Checkpoints_supervised_half_width_b_1024_lr_005
+4,Ecoset sup,1,ecoset,/nfs/gatsbystor/ammarica/Ecoset/Checkpoints_supervised_b_1024_lr_01
+5,Ecoset sup,2,ecoset,/nfs/gatsbystor/ammarica/Ecoset/Checkpoints_supervised_2_wider_b_1024_lr_015
+6,Same acc sup,0.5,imagenet,/nfs/gatsbystor/ammarica/Same_acc_sup/Checkpoints_supervised_half_width_b_1024_lr_05_new
+7,Same acc sup,1,imagenet,/nfs/gatsbystor/ammarica/Same_acc_sup/Checkpoints_supervised_b_1024_lr_01
+8,Same acc sup,2,imagenet,/nfs/gatsbystor/ammarica/Same_acc_sup/Checkpoints_supervised_2_wider_b_1024_lr_075
+9,SimCLR,0.5,imagenet,/nfs/gatsbystor/ammarica/SimCLR-with-MouseNet/Checkpoints_simclr_half_width_lr_025
+10,SimCLR,1,imagenet,/nfs/gatsbystor/ammarica/SimCLR-with-MouseNet/Checkpoints_simclr_2_gpu_b_1024_lr_05
+11,SimCLR,2,imagenet,/nfs/gatsbystor/ammarica/SimCLR-with-MouseNet/Checkpoints_simclr_2_wider_lr_075
+12,Supervised,0.5,imagenet,/nfs/gatsbystor/ammarica/Supervised/Checkpoints_supervised_half_width_b_1024_lr_005
+13,Supervised,1,imagenet,/nfs/gatsbystor/ammarica/Supervised/Checkpoints_supervised_b_1024_lr_05_new
+14,Supervised,2,imagenet,/nfs/gatsbystor/ammarica/Supervised/Checkpoints_supervised_wide_b_1024_lr_05_new

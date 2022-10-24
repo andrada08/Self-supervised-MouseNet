@@ -32,6 +32,17 @@ import torchvision.models as models
 import simsiam.loader
 import simsiam.builder
 
+class Args_LCN:
+   def __init__(self, task):
+      self.n_first_conv = 0
+      self.conv_1x1 = False
+      self.freeze_1x1 = False
+      self.locally_connected_deviation_eps = -1 # random; 0 for convolutional init
+      self.task = task
+      self.input_scale = 1
+      # added dataset input_size = [64, 64] and n_classes = 1000 
+
+
 # mousenet stuff
 
 import sys
@@ -96,8 +107,27 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+
+# to implement both simsiam and simclr
+parser.add_argument('--model_name', type=str, 
+                    help='implementation can be either SimSiam or SimCLR')
+parser.add_argument('--temperature', default=0.07, type=float,
+                    help='softmax temperature (default: 0.07)')
+
+# for dataset name
+parser.add_argument('--dataset_name', default='imagenet', type=str, help='name of dataset')
+
+# for validation
+parser.add_argument('--split_seed', default=0, type=float,
+                    help='train validation split seed (default: 0)')
+parser.add_argument('--val_size', default=10000, type=float,
+                    help='size of validation set (default: 10000)')
+
 # from MouseNet
 parser.add_argument('--mask', default = 3, type=int, help='if use Gaussian mask')
+
+# added to make network wider
+parser.add_argument('--scale', default = 1, type=float, help='scale network width')
 
 # for saving different checkpoints
 parser.add_argument('--save_dir', default = '/nfs/gatsbystor/ammarica/SimSiam-with-MouseNet/Checkpoints/', type=str, help='save directory for checkpoints')
@@ -110,6 +140,9 @@ parser.add_argument('--pred-dim', default=512, type=int,
                     help='hidden dimension of the predictor (default: 512)')
 parser.add_argument('--fix-pred-lr', action='store_true',
                     help='Fix learning rate for the predictor')
+
+# locally connected stuff
+parser.add_argument('--is_LCN', default=None, help='locally connected network')
 
 def main():
 
@@ -174,10 +207,16 @@ def main_worker(gpu, ngpus_per_node, args):
     # create model
     print("=> creating model '{}'".format(args.arch))
 
+    # get_number_classes
+    if args.dataset_name == 'imagenet':
+        num_classes = 1000
+    if args.dataset_name == 'ecoset':
+        num_classes = 565
+
     if args.arch == 'mouse_net':
         net = network.load_network_from_pickle('/nfs/nhome/live/ammarica/SimSiam-with-MouseNet/simsiam/network_complete_updated_number(3,64,64).pkl')
         def get_mousenet(num_classes, zero_init_residual=True):
-            return MouseNetCompletePool(num_classes, this_net=net, mask=args.mask)
+            return MouseNetCompletePool(num_classes, this_net=net, mask=args.mask, scale=args.scale)
         model = simsiam.builder.SimSiam(
             get_mousenet,
             args.dim, args.pred_dim, args.mask)
@@ -185,6 +224,16 @@ def main_worker(gpu, ngpus_per_node, args):
         model = simsiam.builder.SimSiam(
             models.__dict__[args.arch],
             args.dim, args.pred_dim, args.mask)
+
+    # make locally connected
+    if args.is_LCN is not None:
+        sys.path.append('/nfs/nhome/live/ammarica/SimSiam-with-MouseNet/towards-bio-plausible-conv/networks/')
+        from network_utils import convert_network_to_locally_connected
+        
+        if args.dataset_name == 'imagenet' and args.arch == 'mouse_net':
+            args_LCN = Args_LCN(task = 'MouseNet_w_ImageNet')
+        
+        convert_network_to_locally_connected(model, args_LCN)
 
     # infer learning rate before changing batch size
     init_lr = args.lr * args.batch_size / 256
@@ -223,6 +272,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # define loss function (criterion) and optimizer
     criterion = nn.CosineSimilarity(dim=1).cuda(args.gpu)
 
+
     if args.fix_pred_lr:
         optim_params = [{'params': model.module.encoder.parameters(), 'fix_lr': False},
                         {'params': model.module.predictor.parameters(), 'fix_lr': True}]
@@ -232,6 +282,9 @@ def main_worker(gpu, ngpus_per_node, args):
     optimizer = torch.optim.SGD(optim_params, init_lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
+
+    # grad scaler
+    scaler = torch.cuda.amp.grad_scaler.GradScaler()
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -262,13 +315,14 @@ def main_worker(gpu, ngpus_per_node, args):
     
     # changed to 64 for mousenet training
     augmentation = [
-        transforms.RandomResizedCrop(64, scale=(0.2, 1.)),
+        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
         transforms.RandomApply([
             transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
         ], p=0.8),
         transforms.RandomGrayscale(p=0.2),
         transforms.RandomApply([simsiam.loader.GaussianBlur([.1, 2.])], p=0.5),
         transforms.RandomHorizontalFlip(),
+        transforms.Resize(64),
         transforms.ToTensor(),
         normalize
     ]
@@ -276,6 +330,11 @@ def main_worker(gpu, ngpus_per_node, args):
     train_dataset = datasets.ImageFolder(
         traindir,
         simsiam.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+
+    if args.dataset_name == 'imagenet':
+        train_dataset = torch.utils.data.random_split(
+            train_dataset, [len(train_dataset) - args.val_size, args.val_size],
+            generator=torch.Generator().manual_seed(args.split_seed))[0]
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -292,19 +351,19 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, init_lr, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        train(train_loader, model, criterion, optimizer, scaler, epoch, args)
 
-        if epoch+1%10==0 and not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch), dir=args.save_dir)
+        if (epoch+1)%10==0:
+            if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch), dir=args.save_dir)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4f')
@@ -321,20 +380,68 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure data loading time
         data_time.update(time.time() - end)
 
+        # added this
+        optimizer.zero_grad()
+
         if args.gpu is not None:
             images[0] = images[0].cuda(args.gpu, non_blocking=True)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
 
         # compute output and loss
-        p1, p2, z1, z2 = model(x1=images[0], x2=images[1])
-        loss = -(criterion(p1, z2).mean() + criterion(p2, z1).mean()) * 0.5
+        with torch.cuda.amp.autocast():
+            if(args.model_name == 'SimSiam'):
+                    p1, p2, z1, z2 = model(x1=images[0], x2=images[1])
+                    loss = -(criterion(p1, z2).mean() + criterion(p2, z1).mean()) * 0.5
+            if(args.model_name == 'SimCLR'):
+                    p1, p2, _, _ = model(x1=images[0], x2=images[1])
+
+                    # similarity_matrix = criterion(torch.cat([p1,p2], dim=0)) / args.temperature
+
+                    # negative_examples = torch.logsumexp(similarity_matrix.flatten()[1:].view(
+                    # 2 * args.batch_size - 1, 2 * args.batch_size + 1)[:,:-1].reshape(
+                    #     2 * args.batch_size, 2 * args.batch_size - 1), dim=1).mean()
+
+                    # positive_examples = similarity_matrix[torch.arange(0, args.batch_size, device=device),
+                    #                                   torch.arange(args.batch_size, 2 * args.batch_size, device=device)].mean()
+
+                    # loss = negative_examples - positive_examples
+                    
+                    # other way
+                    # p1 = p1 / torch.linalg.norm(p1, dim=1, keepdim=True)
+                    # p2 = p2 / torch.linalg.norm(p2, dim=1, keepdim=True)
+                    # z_all = torch.vstack((p1,p2))
+                    # tau = args.temperature
+                    # sim_all = torch.exp(z_all.matmul(z_all.T)/tau)
+                    # denominator = sim_all.sum(dim=-1) - np.exp(1.0 / tau)
+                    # loss = -torch.log(sim_all[i, i+N] / denominator[i])
+
+                    p1 = p1 / torch.linalg.norm(p1, dim=1, keepdim=True)
+                    p2 = p2 / torch.linalg.norm(p2, dim=1, keepdim=True)
+                    z_all = torch.vstack((p1,p2))
+                    similarity_matrix = z_all.matmul(z_all.T)/args.temperature
+
+                    negative_examples = torch.logsumexp(similarity_matrix.flatten()[1:].view(
+                    2 * args.batch_size - 1, 2 * args.batch_size + 1)[:,:-1].reshape(
+                        2 * args.batch_size, 2 * args.batch_size - 1), dim=1).mean()
+
+                    positive_examples = similarity_matrix[torch.arange(0, args.batch_size, device=p1.device),
+                                                    torch.arange(args.batch_size, 2 * args.batch_size, device=p1.device)].mean()
+
+                    loss = negative_examples - positive_examples
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         losses.update(loss.item(), images[0].size(0))
+            
+
 
         # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        #optimizer.zero_grad()
+        #loss.backward()
+        #optimizer.step()
+        
 
         # measure elapsed time
         batch_time.update(time.time() - end)

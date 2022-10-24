@@ -107,7 +107,7 @@ def get_RSM(CreLine = ['Cux2-CreERT2'], TargetedStruct = ['VISp'], ImagingDepth 
                 data_set, events = get_one_dataset(CreLine = CreLine, TargetedStruct = TargetedStruct, ImagingDepth = ImagingDepth, StimType = StimType, ExpContainerIdx = eccounter,ExpIdx = expcounter)
 
                 if StimType == 'natural_scenes':
-                    activations = get_activations_natuscene(data_set, event)
+                    activations = get_activations_natuscene(data_set, events)
 
                 elif StimType == 'drifting_gratings':
                     activations = get_activations_dg(data_set)
@@ -176,7 +176,7 @@ def compare_multi_RSMs(all_RSM):
 def get_number_experiments(CreLine = ['Cux2-CreERT2'],TargetedStruct = ['VISp'],ImagingDepth = [175], StimType = 'natural_scenes'):
     all_ecs = boc.get_experiment_containers(cre_lines=CreLine,targeted_structures=TargetedStruct,imaging_depths=ImagingDepth)
     num_exp_containers = len(all_ecs)
-    #print("number of ", *CreLine, "experiment containers: %d\n" % num_exp_containers)
+    print("number of ", *CreLine, "experiment containers: %d\n" % num_exp_containers)
     num_exps = list()
     for eccounter in range(0,num_exp_containers):
         ec_id = all_ecs[eccounter]['id']

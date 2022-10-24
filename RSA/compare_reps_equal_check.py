@@ -1,11 +1,8 @@
-import this
 import scipy as sp
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-
-import h5py
 
 from deepModelsAnalysis import *
 from allenDataAnalysis import *
@@ -108,7 +105,6 @@ def compare_reps(model_type = [('CPC','monkeynet','./epoch100.pth.tar')], StimTy
             elif this_model_type == 'ActionRecog':
                 num_ignor_layers = 0
 
-            print(this_model_type)
             r = np.empty([len(all_RSM_model.keys())-num_ignor_layers,num_sessions])
             for i in range(len(all_RSM_model.keys())-num_ignor_layers):
                 act1 = activations_model[list(all_RSM_model.keys())[i]].mean(1).reshape(activations_model[list(all_RSM_model.keys())[i]].shape[0],-1)
@@ -133,6 +129,7 @@ def compare_reps(model_type = [('CPC','monkeynet','./epoch100.pth.tar')], StimTy
                         # assert len(conv1)==len(RSM_tmp.shape), "%s\n%s\n%s\n%s\n%s" % (this_layer_name, len(conv1), len(RSM_tmp), conv1, RSM_tmp)
                         if np.all(conv1.shape==RSM_tmp.shape):
                             good_sessions = good_sessions + 1
+                            conv1 = RSM_tmp
                             r[i,j]=compute_ssm(conv1, RSM_tmp)
                         else:
                             r[i,j] = np.nan
@@ -141,19 +138,7 @@ def compare_reps(model_type = [('CPC','monkeynet','./epoch100.pth.tar')], StimTy
 
                     print(this_layer_name, ' has the same shape for conv1 and RSM_tmp in ', good_sessions, ' sessions')
 
-                    # debug nans
-                    # if this_layer_name == 'VISli5' or this_layer_name == 'VISli2/3':
-                    #     debug_path = '/nfs/gatsbystor/ammarica/RSA/debug/simclr_half_width/'
-                    #     new_layer_name = this_layer_name.replace('/', '_')  
-                    #     debug_save_path = f'{debug_path}data_{new_layer_name}.hdf5'
-                    #     debug_save_file = h5py.File(debug_save_path, 'w')
-                    #     dset = debug_save_file.create_dataset('r', data=r)
-                    #     dset2 = debug_save_file.create_dataset('conv1', data=conv1)
-                    #     dset3 = debug_save_file.create_dataset('all_RSM_Allen', data=all_RSM_Allen)
-                    #     debug_save_file.close()
-                    #     print('Saved debug info for ', this_layer_name)                        
-
-
+           
             # commented out as this is only for monkey net
             # # downsample layers ##
             # r = downsample_r(r,backbone=this_backbone)
@@ -182,17 +167,6 @@ def compare_reps(model_type = [('CPC','monkeynet','./epoch100.pth.tar')], StimTy
 
             noise_ceiling = {'rsm': noise_ceiling_rsm}
             
-            # save stuff
-            # save stuff
-            save_path = f'{path_figure}data.hdf5'
-            save_file = h5py.File(save_path, 'w')
-            dset = save_file.create_dataset('r', data=r)
-            dset.attrs['model'] = this_model_type
-            dset.attrs['backbone'] = this_backbone
-            dset.attrs['noise_ceiling'] = noise_ceiling_rsm
-            save_file.close()
-            print('Saved RSA info')
-
             # plot reps similarities per model/area
             plot_reps_sim(this_model_type, this_backbone, R, noise_ceiling, thisFigureName)
             
@@ -318,7 +292,6 @@ def plot_reps_sim(model_type, backbone, R, noise_ceiling, FigurePath):
     print('What is in hierarchical levels: ', hierarchical_levels)
     print('What is in the other thing: ', temp)
 
-    plt.figure()
     plt.errorbar(hierarchical_levels,np.median(r,1)/np.median(noise_ceiling_rsm),xerr=0, yerr=np.std(r/np.median(noise_ceiling_rsm),1)/2,color='black',fmt='.')
     plt.scatter(hierarchical_levels,np.median(r,1)/np.median(noise_ceiling_rsm),s = 100,color=color_map[areas_label],alpha=.8)
     plt.grid()
@@ -343,7 +316,6 @@ def plot_reps_sim(model_type, backbone, R, noise_ceiling, FigurePath):
     print('What is median of r: ', np.median(r,1))
 
     # replace hierarchical_levels everywhere 
-    plt.figure()
     plt.fill_between(np.arange(0,np.max(hierarchical_levels)+1), np.transpose(np.median(noise_ceiling_rsm)-np.std(noise_ceiling_rsm)/2), 
                      np.transpose(np.median(noise_ceiling_rsm)+np.std(noise_ceiling_rsm)/2),color='green',alpha=0.5)
     plt.errorbar(hierarchical_levels,np.median(r,1),xerr=0, yerr=np.std(r,1)/2,color='black',fmt='.')

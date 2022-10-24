@@ -21,7 +21,7 @@ import pdb
 data_dir = '/nfs/gatsbystor/ammarica/allendata/RSM_model' #MAKE SURE THIS IS ON GATSBYSTOR
 manifest_dir = '/nfs/gatsbystor/ammarica/allendata/RSM_model/boc' #MAKE SURE THIS IS ON GATSBYSTOR
 
-# changed this to only do natural scenes
+# changed both to only do natural scenes
 def prePareAllenStim_for_CPC(exp_id,blocksize,ds_rate):
     boc = BrainObservatoryCache(manifest_file=manifest_dir+'manifest.json')
     data_set = boc.get_ophys_experiment_data(exp_id)
@@ -52,18 +52,51 @@ def prePareAllenStim_for_CPC(exp_id,blocksize,ds_rate):
        
     return data_colored
 
+
+def prePareAllenStim_for_othermodels(exp_id, frame_per_block, ds_rate):
+    boc = BrainObservatoryCache(manifest_file=manifest_dir+'manifest.json')
+    data_set = boc.get_ophys_experiment_data(exp_id)
+    
+    scenes = data_set.get_stimulus_template('natural_scenes')
+    
+    numImages = scenes.shape[0]
+    data = np.ndarray((numImages,1,224,224))
+    for n in range(0,numImages):
+        thisImage = np.array(scenes[n,:,0:918])
+        thisImage = cv2.resize(thisImage,(224,224))
+        thisImage = (thisImage - np.mean(thisImage))/np.std(thisImage)
+        data[n,0,:,:] = thisImage
+    
+    data_colored = np.concatenate((data,data,data),axis=1)
+  
+    return data_colored
      
 def get_activations_CPC(PATH,dataset,backbone,pretrained = True):
 
-    sys.path.append('../../ventral-dorsal-model/Models/CPC/backbone/')
-    sys.path.append('../../ventral-dorsal-model/Models/CPC/dpc/')
-    sys.path.append('../SimSiam-with-MouseNet/simsiam')
-    sys.path.append('../../ventral-dorsal-model/RSM')
+    #sys.path.append('../../ventral-dorsal-model/Models/CPC/backbone')
+    #sys.path.append('../../ventral-dorsal-model/Models/CPC/dpc')
+    #sys.path.append('../SimSiam-with-MouseNet/simsiam')
+    #sys.path.append('../../ventral-dorsal-model/RSM')
     #from resnet_2d3d import neq_load_customized
-    from model_3d import DPC_RNN
+    #from model_3d import DPC_RNN
     #from convrnn import ConvGRUCell
-    from mousenet_complete_pool import Conv2dMask, MouseNetCompletePool
+    #from mousenet_complete_pool import Conv2dMask, MouseNetCompletePool
     #from monkeynet import SymmetricConv3d
+
+    curr_wd = os.getcwd()
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(file_dir)
+    sys.path.append(os.path.join(os.getcwd(),'../../ventral-dorsal-model/Models/CPC/backbone/'))
+    sys.path.append(os.path.join(os.getcwd(),'../../ventral-dorsal-model/Models/CPC/dpc/'))
+    sys.path.append(os.path.join(os.getcwd(),'../../ventral-dorsal-model/RSM/'))
+    sys.path.append(os.path.join(os.getcwd(),'../SimSiam-with-MouseNet/simsiam/'))
+    os.chdir(curr_wd)
+
+    from resnet_2d3d import neq_load_customized
+    from model_3d import DPC_RNN
+    from convrnn import ConvGRUCell
+    from mousenet_complete_pool import Conv2dMask, MouseNetCompletePool
+    from monkeynet import SymmetricConv3d
 
     '''
     
@@ -173,7 +206,7 @@ def get_activations_othermodels(data_,ModelName):
     elif ModelName == 'vgg16':
         net = tmodels.vgg16(pretrained=True)
     elif ModelName == 'resnet18':
-        net = tmodels.resnet18(pretrained=True)
+        net = tmodels.resnet18(pretrained=False).eval()
         
     # a dictionary that keeps saving the activations as they come
     activations = collections.defaultdict(list)
@@ -203,7 +236,7 @@ def get_othermodels_RSMs(StimType,ModelName,frame_per_block=5,ds_rate=3):
         data = prePareVisualStim_for_othermodels()
     
     elif StimType == 'natural_scenes':    
-        data, _ = prePareAllenStim_for_othermodels(501498760)
+        data = prePareAllenStim_for_othermodels(501498760, frame_per_block, ds_rate)
         
     elif StimType == 'natural_movies':
         _, data = prePareAllenStim_for_othermodels(501498760, frame_per_block, ds_rate)

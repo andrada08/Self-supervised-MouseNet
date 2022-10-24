@@ -27,6 +27,16 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
+class Args_LCN:
+   def __init__(self, task):
+      self.n_first_conv = 0
+      self.conv_1x1 = False
+      self.freeze_1x1 = False
+      self.locally_connected_deviation_eps = -1 # random; 0 for convolutional init
+      self.task = task
+      self.input_scale = 1
+      # added dataset input_size = [64, 64] and n_classes = 1000 
+
 # mousenet stuff
 
 import sys
@@ -91,6 +101,29 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 
 # from MouseNet
 parser.add_argument('--mask', default = 3, type=int, help='if use Gaussian mask')
+
+# for dataset name
+parser.add_argument('--dataset_name', default='imagenet', type=str, help='name of dataset')
+
+# for validation
+parser.add_argument('--split_seed', default=0, type=float,
+                    help='train validation split seed (default: 0)')
+parser.add_argument('--val_size', default=10000, type=float,
+                    help='size of validation set (default: 10000)')
+
+# for test
+# parser.add_argument('--test', dest='test', action='store_true',
+#                     help='evaluate model on test set')
+
+# added to make network wider
+parser.add_argument('--scale', default = 1, type=float, help='scale network width')
+
+# stop at self-sup value
+parser.add_argument('--self_sup_acc', default=None, type=float, help='save checkpoint at this value')
+parser.add_argument('--self_sup_stop_train', default=None, help='stop training after saving checkpoint')
+
+# locally connected stuff
+parser.add_argument('--is_LCN', default=None, help='locally connected network')
 
 # additional configs:
 parser.add_argument('--pretrained', default='', type=str,
@@ -161,12 +194,18 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.distributed.barrier()
     # create model
 
-        # create model
+    # create model
     print("=> creating model '{}'".format(args.arch))
+
+    # get_number_classes
+    if args.dataset_name == 'imagenet':
+        n_classes = 1000
+    if args.dataset_name == 'ecoset':
+        n_classes = 565
 
     if args.arch == 'mouse_net':
         net = network.load_network_from_pickle('/nfs/nhome/live/ammarica/SimSiam-with-MouseNet/simsiam/network_complete_updated_number(3,64,64).pkl')
-        model = MouseNetCompletePool(num_classes=1000,this_net=net, mask=args.mask)
+        model = MouseNetCompletePool(num_classes=n_classes,this_net=net, mask=args.mask, scale=args.scale)
 	    # can do this because they have matching out and in dims      
         new_fc = model.fc[-1]
         model.fc = new_fc
@@ -211,6 +250,16 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             print("=> no checkpoint found at '{}'".format(args.pretrained))
 
+   # make locally connected
+    if args.is_LCN is not None:
+        sys.path.append('/nfs/nhome/live/ammarica/SimSiam-with-MouseNet/towards-bio-plausible-conv/networks/')
+        from network_utils import convert_network_to_locally_connected
+        
+        if args.dataset_name == 'imagenet' and args.arch == 'mouse_net':
+            args_LCN = Args_LCN(task = 'MouseNet_w_ImageNet')
+        
+        convert_network_to_locally_connected(model, args_LCN)
+    
     # infer learning rate before changing batch size
     init_lr = args.lr * args.batch_size / 256
 
@@ -286,20 +335,38 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    valdir = os.path.join(args.data, 'val')
+    if args.dataset_name == 'imagenet':
+        traindir = os.path.join(args.data, 'train')
+        testdir = os.path.join(args.data, 'val')
+    if args.dataset_name == 'ecoset':
+        traindir = os.path.join(args.data, 'train')
+        valdir = os.path.join(args.data, 'val')
+        testdir = os.path.join(args.data, 'test')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    # changed to 64 for mousenet training
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        transforms.Compose([
+    transforms_train = [
             transforms.RandomResizedCrop(64),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
-        ]))
+        ]
+    transforms_test = [
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.Resize(64),
+            transforms.ToTensor(),
+            normalize,
+        ]
+
+    # changed to 64 for mousenet training
+    train_dataset = datasets.ImageFolder(
+        traindir, transforms.Compose(transforms_train))
+
+    if args.dataset_name == 'imagenet':
+        train_dataset = torch.utils.data.random_split(
+            train_dataset, [len(train_dataset) - args.val_size, args.val_size],
+            generator=torch.Generator().manual_seed(args.split_seed))[0]
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -311,20 +378,49 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
    
     # added resize to 64 for mousenet training
+    # val_loader = torch.utils.data.DataLoader(
+    #     datasets.ImageFolder(valdir, transforms.Compose([
+    #         transforms.Resize(256),
+    #         transforms.CenterCrop(224),
+    #         transforms.Resize(64),
+    #         transforms.ToTensor(),
+    #         normalize,
+    #     ])),
+    #     batch_size=256, shuffle=False,
+    #     num_workers=args.workers, pin_memory=True)
+
+    # validation set
+    if args.dataset_name == 'imagenet':
+        val_dataset = datasets.ImageFolder(traindir, transforms.Compose(transforms_test))
+        
+        val_dataset = torch.utils.data.random_split(
+                val_dataset, [len(val_dataset) - args.val_size, args.val_size],
+                generator=torch.Generator().manual_seed(args.split_seed))[1]
+    elif args.dataset_name == 'ecoset':
+        val_dataset = datasets.ImageFolder(valdir, transforms.Compose(transforms_test))
+
     val_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.Resize(64),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=256, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+        val_dataset, batch_size=256, shuffle=False,
+        num_workers=args.workers, pin_memory=True)    
 
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
+    
+    # test stuff
+    
+    # test_dataset = datasets.ImageFolder(testdir, transforms.Compose(transforms_test))
+
+    # test_loader = torch.utils.data.DataLoader(
+    #     test_dataset, batch_size=256, shuffle=False,
+    #     num_workers=args.workers, pin_memory=True)  
+
+    # if args.test:
+    #     validate(test_loader, model, criterion, args)
+    #     return
+
+
+    previous_acc1 = 0
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -342,16 +438,37 @@ def main_worker(gpu, ngpus_per_node, args):
         best_acc1 = max(acc1, best_acc1)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0) and (epoch+1)%10==0:
+                and args.rank % ngpus_per_node == 0):
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
-            }, is_best)
+            }, is_best=1)
             # if epoch == args.start_epoch:
             #     sanity_check(model.state_dict(), args.pretrained)
+
+        # save checkpoint at accuracy of self-sup value
+        if args.self_sup_acc is not None:
+            is_self_sup = (acc1 >= args.self_sup_acc) and (previous_acc1 <= args.self_sup_acc)
+
+            if is_self_sup:
+                print('Found self-sup acc match')
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'acc1': acc1,
+                    'optimizer' : optimizer.state_dict(),
+                }, is_self_sup=1)
+                print('Saved self-sup acc match checkpoint')
+
+                if args.self_sup_stop_train:
+                    print('Ended training')
+                    break
+            
+            previous_acc1 = acc1
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -450,10 +567,12 @@ def validate(val_loader, model, criterion, args):
     return top1.avg
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, is_best=None, is_self_sup=None, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+    if is_self_sup:
+        shutil.copyfile(filename, 'model_self_sup.pth.tar')
 
 
 def sanity_check(state_dict, pretrained_weights):

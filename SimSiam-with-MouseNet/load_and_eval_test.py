@@ -27,6 +27,8 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 
+import pandas as pd
+
 class Args_LCN:
    def __init__(self, task):
       self.n_first_conv = 0
@@ -111,15 +113,19 @@ parser.add_argument('--split_seed', default=0, type=float,
 parser.add_argument('--val_size', default=10000, type=float,
                     help='size of validation set (default: 10000)')
 
-# locally connected stuff
-parser.add_argument('--is_LCN', default=None, help='locally connected network')
-
 # for test
-# parser.add_argument('--test', dest='test', action='store_true',
-#                     help='evaluate model on test set')
+parser.add_argument('--test', dest='test', action='store_true',
+                    help='evaluate model on test set')
 
 # added to make network wider
 parser.add_argument('--scale', default = 1, type=float, help='scale network width')
+
+# stop at self-sup value
+parser.add_argument('--self_sup_acc', default=None, type=float, help='save checkpoint at this value')
+parser.add_argument('--self_sup_stop_train', default=None, help='stop training after saving checkpoint')
+
+# locally connected stuff
+parser.add_argument('--is_LCN', default=None, help='locally connected network')
 
 # additional configs:
 parser.add_argument('--pretrained', default='', type=str,
@@ -127,8 +133,11 @@ parser.add_argument('--pretrained', default='', type=str,
 parser.add_argument('--lars', action='store_true',
                     help='Use LARS')
 
-best_acc1 = 0
-
+# list of checkpoint paths
+parser.add_argument('--list_pretrained', default='', type=str,
+                    help='list of paths to pretrained checkpoints')
+parser.add_argument('--save_eval_results', default='', type=str,
+                    help='path to results to evaluation')
 
 def main():
     args = parser.parse_args()
@@ -190,307 +199,218 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.distributed.barrier()
     # create model
 
-        # create model
-    print("=> creating model '{}'".format(args.arch))
-
-    # get_number_classes
-    if args.dataset_name == 'imagenet':
-        n_classes = 1000
-    if args.dataset_name == 'ecoset':
-        n_classes = 565
-
-    if args.arch == 'mouse_net':
-        net = network.load_network_from_pickle('/nfs/nhome/live/ammarica/SimSiam-with-MouseNet/simsiam/network_complete_updated_number(3,64,64).pkl')
-        model = MouseNetCompletePool(num_classes=n_classes,this_net=net, mask=args.mask, scale=args.scale)
-	    # can do this because they have matching out and in dims      
-        new_fc = model.fc[-1]
-        model.fc = new_fc
-    else:
-        model = models.__dict__[args.arch]()
-
-    # freeze all layers but the last fc
-    for name, param in model.named_parameters():
-        if name not in ['fc.weight', 'fc.bias']:
-            param.requires_grad = False
-            
-    # init the fc layer - added try for mouse_net
-    try:
-        model.fc[-1].weight.data.normal_(mean=0.0, std=0.01)
-        model.fc[-1].bias.data.zero_()
-    except:
-        model.fc.weight.data.normal_(mean=0.0, std=0.01)
-        model.fc.bias.data.zero_()
+    all_acc1 = []
 
     # load from pre-trained, before DistributedDataParallel constructor
-    if args.pretrained:
-        if os.path.isfile(args.pretrained):
-            print("=> loading checkpoint '{}'".format(args.pretrained))
-            checkpoint = torch.load(args.pretrained, map_location="cpu")
+    read_df = pd.read_csv(args.list_pretrained)
+    for i in range(read_df.shape[0]):
+        this_pretrained = read_df.iloc[i]
+        this_name = this_pretrained['name']
+        this_width = this_pretrained['width']
+        this_dataset = this_pretrained['dataset']
+        this_model = this_name + ' ' + str(this_width) + ' width'
+        this_path = this_pretrained['checkpoint']
+        this_checkpoint = f'{this_path}/model_best.pth.tar'
 
+            # create model
+        print("=> creating model '{}'".format(args.arch))
+
+        # get_number_classes
+        if this_dataset == 'imagenet':
+            n_classes = 1000
+        if this_dataset == 'ecoset':
+            n_classes = 565
+
+        if args.arch == 'mouse_net':
+            net = network.load_network_from_pickle('/nfs/nhome/live/ammarica/SimSiam-with-MouseNet/simsiam/network_complete_updated_number(3,64,64).pkl')
+            model = MouseNetCompletePool(num_classes=n_classes,this_net=net, mask=args.mask, scale=this_width)
+            # can do this because they have matching out and in dims      
+            new_fc = model.fc[-1]
+            model.fc = new_fc
+        else:
+            model = models.__dict__[args.arch]()
+
+        # # freeze all layers but the last fc
+        # for name, param in model.named_parameters():
+        #     if name not in ['fc.weight', 'fc.bias']:
+        #         param.requires_grad = False
+                
+        # init the fc layer - added try for mouse_net
+        # try:
+        #     model.fc[-1].weight.data.normal_(mean=0.0, std=0.01)
+        #     model.fc[-1].bias.data.zero_()
+        # except:
+        #     model.fc.weight.data.normal_(mean=0.0, std=0.01)
+        #     model.fc.bias.data.zero_()
+
+        try:
+            model.fc[-1].weight.data.fill_(float('nan'))
+            model.fc[-1].bias.data.fill_(float('nan'))
+        except:
+            model.fc.weight.data.fill_(float('nan'))
+            model.fc.bias.data.fill_(float('nan'))
+
+        if os.path.isfile(this_checkpoint):
+            
+            print("=> loading checkpoint '{}'".format(this_model))
+            checkpoint = torch.load(this_checkpoint, map_location="cpu")
+            
             # rename moco pre-trained keys
             state_dict = checkpoint['state_dict']
+
+            print('state_dict: ', list(state_dict.keys()))
+
             for k in list(state_dict.keys()):
                 # retain only encoder up to before the embedding layer
-                if k.startswith('module.encoder') and not k.startswith('module.encoder.fc'):
+                if k.startswith('module.'): # and not k.startswith('module.encoder.fc'):
                     # remove prefix
-                    state_dict[k[len("module.encoder."):]] = state_dict[k]
+                    state_dict[k[len("module."):]] = state_dict[k]
                 # delete renamed or unused k
-                del state_dict[k]
+                # del state_dict[k]
 
-            args.start_epoch = 0
             msg = model.load_state_dict(state_dict, strict=False)
-            
+            print(set(msg.missing_keys))
+
             # assert set(msg.missing_keys) == {"fc.weight", "fc.bias"}
 
-            print("=> loaded pre-trained model '{}'".format(args.pretrained))
+            print("=> loaded pre-trained model '{}'".format(this_checkpoint))
         else:
-            print("=> no checkpoint found at '{}'".format(args.pretrained))
+            print("=> no checkpoint found at '{}'".format(this_checkpoint))
 
-    # make locally connected
-    if args.is_LCN is not None:
-        sys.path.append('/nfs/nhome/live/ammarica/SimSiam-with-MouseNet/towards-bio-plausible-conv/networks/')
-        from network_utils import convert_network_to_locally_connected
-        
-        if args.dataset_name == 'imagenet' and args.arch == 'mouse_net':
-            args_LCN = Args_LCN(task = 'MouseNet_w_ImageNet')
-        
-        convert_network_to_locally_connected(model, args_LCN)
+        # infer learning rate before changing batch size
+        init_lr = args.lr * args.batch_size / 256
 
-    # infer learning rate before changing batch size
-    init_lr = args.lr * args.batch_size / 256
-
-    if args.distributed:
-        # For multiprocessing distributed, DistributedDataParallel constructor
-        # should always set the single device scope, otherwise,
-        # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            model.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs we have
-            args.batch_size = int(args.batch_size / ngpus_per_node)
-            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        else:
-            model.cuda()
-            # DistributedDataParallel will divide and allocate batch_size to all
-            # available GPUs if device_ids are not set
-            model = torch.nn.parallel.DistributedDataParallel(model)
-    elif args.gpu is not None:
-        torch.cuda.set_device(args.gpu)
-        model = model.cuda(args.gpu)
-    else:
-        # DataParallel will divide and allocate batch_size to all available GPUs
-        if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
-            model.features = torch.nn.DataParallel(model.features)
-            model.cuda()
-        else:
-            model = torch.nn.DataParallel(model).cuda()
-
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-
-    # optimize only the linear classifier
-    parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
-    print(parameters)
-    assert len(parameters) == 2  # fc.weight, fc.bias
-
-    optimizer = torch.optim.SGD(parameters, init_lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
-    if args.lars:
-        print("=> use LARS optimizer.")
-        from apex.parallel.LARC import LARC
-        optimizer = LARC(optimizer=optimizer, trust_coefficient=.001, clip=False)
-
-    # optionally resume from a checkpoint
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            if args.gpu is None:
-                checkpoint = torch.load(args.resume)
-            else:
-                # Map model to be loaded to specified single gpu.
-                loc = 'cuda:{}'.format(args.gpu)
-                checkpoint = torch.load(args.resume, map_location=loc)
-            args.start_epoch = checkpoint['epoch']
-            best_acc1 = checkpoint['best_acc1']
-            if args.gpu is not None:
-                # best_acc1 may be from a checkpoint from a different GPU
-                best_acc1 = best_acc1.to(args.gpu)
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-
-    cudnn.benchmark = True
-
-    # Data loading code
-    if args.dataset_name == 'imagenet':
-        traindir = os.path.join(args.data, 'train')
-        testdir = os.path.join(args.data, 'val')
-    if args.dataset_name == 'ecoset':
-        traindir = os.path.join(args.data, 'train')
-        valdir = os.path.join(args.data, 'val')
-        testdir = os.path.join(args.data, 'test')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-
-    transforms_train = [
-            transforms.RandomResizedCrop(64),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]
-    transforms_test = [
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.Resize(64),
-            transforms.ToTensor(),
-            normalize,
-        ]
-
-    # changed to 64 for mousenet training
-    train_dataset = datasets.ImageFolder(
-        traindir, transforms.Compose(transforms_train))
-
-    if args.dataset_name == 'imagenet':
-        train_dataset = torch.utils.data.random_split(
-            train_dataset, [len(train_dataset) - args.val_size, args.val_size],
-            generator=torch.Generator().manual_seed(args.split_seed))[0]
-
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
-   
-    # added resize to 64 for mousenet training
-    # val_loader = torch.utils.data.DataLoader(
-    #     datasets.ImageFolder(valdir, transforms.Compose([
-    #         transforms.Resize(256),
-    #         transforms.CenterCrop(224),
-    #         transforms.Resize(64),
-    #         transforms.ToTensor(),
-    #         normalize,
-    #     ])),
-    #     batch_size=256, shuffle=False,
-    #     num_workers=args.workers, pin_memory=True)
-
-    # validation set
-    if args.dataset_name == 'imagenet':
-        val_dataset = datasets.ImageFolder(traindir, transforms.Compose(transforms_test))
-        
-        val_dataset = torch.utils.data.random_split(
-                val_dataset, [len(val_dataset) - args.val_size, args.val_size],
-                generator=torch.Generator().manual_seed(args.split_seed))[1]
-    elif args.dataset_name == 'ecoset':
-        val_dataset = datasets.ImageFolder(valdir, transforms.Compose(transforms_test))
-
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=256, shuffle=False,
-        num_workers=args.workers, pin_memory=True)    
-
-    if args.evaluate:
-        validate(val_loader, model, criterion, args)
-        return
-    
-    # test stuff
-    
-    # test_dataset = datasets.ImageFolder(testdir, transforms.Compose(transforms_test))
-
-    # test_loader = torch.utils.data.DataLoader(
-    #     test_dataset, batch_size=256, shuffle=False,
-    #     num_workers=args.workers, pin_memory=True)  
-
-    # if args.test:
-    #     validate(test_loader, model, criterion, args)
-    #     return
-
-    for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            train_sampler.set_epoch(epoch)
-        adjust_learning_rate(optimizer, init_lr, epoch, args)
+            # For multiprocessing distributed, DistributedDataParallel constructor
+            # should always set the single device scope, otherwise,
+            # DistributedDataParallel will use all available devices.
+            if args.gpu is not None:
+                torch.cuda.set_device(args.gpu)
+                model.cuda(args.gpu)
+                # When using a single GPU per process and per
+                # DistributedDataParallel, we need to divide the batch size
+                # ourselves based on the total number of GPUs we have
+                args.batch_size = int(args.batch_size / ngpus_per_node)
+                args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            else:
+                model.cuda()
+                # DistributedDataParallel will divide and allocate batch_size to all
+                # available GPUs if device_ids are not set
+                model = torch.nn.parallel.DistributedDataParallel(model)
+        elif args.gpu is not None:
+            torch.cuda.set_device(args.gpu)
+            model = model.cuda(args.gpu)
+        else:
+            # DataParallel will divide and allocate batch_size to all available GPUs
+            if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
+                model.features = torch.nn.DataParallel(model.features)
+                model.cuda()
+            else:
+                model = torch.nn.DataParallel(model).cuda()
 
-        # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        # define loss function (criterion) and optimizer
+        criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-        # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        # # optimize only the linear classifier
+        # parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
+        # print(parameters)
+        # assert len(parameters) == 2  # fc.weight, fc.bias
+        
+        parameters = model.parameters()
 
-        # remember best acc@1 and save checkpoint
-        is_best = acc1 > best_acc1
-        best_acc1 = max(acc1, best_acc1)
+        optimizer = torch.optim.SGD(parameters, init_lr,
+                                    momentum=args.momentum,
+                                    weight_decay=args.weight_decay)
+        if args.lars:
+            print("=> use LARS optimizer.")
+            from apex.parallel.LARC import LARC
+            optimizer = LARC(optimizer=optimizer, trust_coefficient=.001, clip=False)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0) and (epoch+1)%10==0:
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best)
-            if epoch == args.start_epoch:
-                sanity_check(model.state_dict(), args.pretrained)
+        cudnn.benchmark = True
+
+        # Data loading code
+        if this_dataset == 'imagenet':
+            args.data = '/tmp/roman/imagenet'
+            traindir = os.path.join(args.data, 'train')
+            testdir = os.path.join(args.data, 'val')
+        if this_dataset == 'ecoset':
+            args.data = '/tmp/andrada/ecoset'
+            traindir = os.path.join(args.data, 'train')
+            valdir = os.path.join(args.data, 'val')
+            testdir = os.path.join(args.data, 'test')
+        
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])
+
+        transforms_train = [
+                transforms.RandomResizedCrop(64),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ]
+        transforms_test = [
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.Resize(64),
+                transforms.ToTensor(),
+                normalize,
+            ]
+
+        # changed to 64 for mousenet training
+        train_dataset = datasets.ImageFolder(
+            traindir, transforms.Compose(transforms_train))
+
+        if this_dataset == 'imagenet':
+            train_dataset = torch.utils.data.random_split(
+                train_dataset, [len(train_dataset) - args.val_size, args.val_size],
+                generator=torch.Generator().manual_seed(args.split_seed))[0]
+
+        if args.distributed:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        else:
+            train_sampler = None
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+            num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+    
+        # validation set
+        if this_dataset == 'imagenet':
+            val_dataset = datasets.ImageFolder(traindir, transforms.Compose(transforms_test))
+            
+            val_dataset = torch.utils.data.random_split(
+                    val_dataset, [len(val_dataset) - args.val_size, args.val_size],
+                    generator=torch.Generator().manual_seed(args.split_seed))[1]
+        elif this_dataset == 'ecoset':
+            val_dataset = datasets.ImageFolder(valdir, transforms.Compose(transforms_test))
+
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset, batch_size=256, shuffle=False,
+            num_workers=args.workers, pin_memory=True)    
+
+        if args.evaluate:
+            validate(val_loader, model, criterion, args)
+            return
+        
+        # test stuff    
+        test_dataset = datasets.ImageFolder(testdir, transforms.Compose(transforms_test))
+
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset, batch_size=256, shuffle=False,
+            num_workers=args.workers, pin_memory=True)  
+
+        if args.test:
+            acc1 = validate(test_loader, model, criterion, args)
+            var1 = acc1.cpu().detach().numpy()
+            all_acc1.append(var1)
+
+    tmp_df = read_df    
+    print(all_acc1)
+    tmp_df['acc1'] = all_acc1 
+    tmp_df.to_csv(args.save_eval_results)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
-    batch_time = AverageMeter('Time', ':6.3f')
-    data_time = AverageMeter('Data', ':6.3f')
-    losses = AverageMeter('Loss', ':.4e')
-    top1 = AverageMeter('Acc@1', ':6.2f')
-    top5 = AverageMeter('Acc@5', ':6.2f')
-    progress = ProgressMeter(
-        len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
-        prefix="Epoch: [{}]".format(epoch))
-
-    """
-    Switch to eval mode:
-    Under the protocol of linear classification on frozen features/models,
-    it is not legitimate to change any part of the pre-trained model.
-    BatchNorm in train mode may revise running mean/std (even if it receives
-    no gradient), which are part of the model parameters too.
-    """
-    model.eval()
-
-    end = time.time()
-    for i, (images, target) in enumerate(train_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        if args.gpu is not None:
-            images = images.cuda(args.gpu, non_blocking=True)
-        target = target.cuda(args.gpu, non_blocking=True)
-
-        # compute output
-        output = model(images)
-        loss = criterion(output, target)
-
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), images.size(0))
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        if i % args.print_freq == 0:
-            progress.display(i)
 
 
 def validate(val_loader, model, criterion, args):
@@ -537,10 +457,12 @@ def validate(val_loader, model, criterion, args):
     return top1.avg
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, is_best=None, is_self_sup=None, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+    if is_self_sup:
+        shutil.copyfile(filename, 'model_self_sup.pth.tar')
 
 
 def sanity_check(state_dict, pretrained_weights):

@@ -69,7 +69,7 @@ class MouseNetCompletePool(nn.Module):
     """
     torch model constructed by parameters provided in network. !!!!!!!!!! Changed from network to this_net
     """
-    def __init__(self, num_classes, this_net, mask=3):
+    def __init__(self, num_classes, this_net, mask=3, scale=1):
         super(MouseNetCompletePool, self).__init__()
         self.Convs = nn.ModuleDict()
         self.BNs = nn.ModuleDict()
@@ -81,22 +81,37 @@ class MouseNetCompletePool(nn.Module):
 
         for layer in this_net.layers:
             params = layer.params
-            self.Convs[layer.source_name + layer.target_name] = Conv2dMask(params.in_channels, params.out_channels, params.kernel_size,
-                                                    params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
-            self.area_channels.update({layer.target_name:params.out_channels})
+
+            # add scale everywhere for channels - except input of layer 1
+            if layer == this_net.layers[0]:
+                self.Convs[layer.source_name + layer.target_name] = Conv2dMask(params.in_channels, int(scale*params.out_channels), params.kernel_size,
+                                                        params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding)
+            else:
+                self.Convs[layer.source_name + layer.target_name] = Conv2dMask(int(scale*params.in_channels), int(scale*params.out_channels), params.kernel_size,
+                                                        params.gsh, params.gsw, stride=params.stride, mask=mask, padding=params.padding) 
+
+            self.area_channels.update({layer.target_name:int(scale*params.out_channels)})
             ## plotting Gaussian mask
             #plt.title('%s_%s_%sx%s'%(e[0].replace('/',''), e[1].replace('/',''), params.kernel_size, params.kernel_size))
             #plt.savefig('%s_%s'%(e[0].replace('/',''), e[1].replace('/','')))
             
             if layer.target_name not in self.BNs:
-                self.BNs[layer.target_name] = nn.BatchNorm2d(params.out_channels)
+                self.BNs[layer.target_name] = nn.BatchNorm2d(int(scale*params.out_channels))
 
         # calculate total size output to classifier
         total_size=0
         
         for area in OUTPUT_AREAS:
             layer = this_net.find_conv_source_target('%s2/3'%area[:-1],'%s'%area)
-            total_size += int(16*layer.params.out_channels)
+
+            # add scale here too
+
+            # original:
+            # total_size += int(16*scale*layer.params.out_channels)
+
+            # modified for test!! 
+            total_size += int(scale*layer.params.out_channels)
+
         #     if area =='VISp5':
         #         layer = network.find_conv_source_target('VISp2/3','VISp5')
         #         visp_out = layer.params.out_channels
@@ -108,7 +123,11 @@ class MouseNetCompletePool(nn.Module):
         #     else:
         #         layer = network.find_conv_source_target('%s2/3'%area[:-1],'%s'%area)
         #         total_size += int(layer.out_size*layer.out_size*layer.params.out_channels)
-      # changed to fc for simsiam   
+        
+        # modified for test!!
+        total_size = 16*total_size
+
+        # changed to fc for simsiam   
         self.fc = nn.Sequential(
             nn.Linear(int(total_size), num_classes),
             # nn.Linear(int(total_size), HIDDEN_LINEAR),
